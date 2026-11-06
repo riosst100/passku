@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Passku",
-  description: "Simpan dan lihat credentials login secara aman, bisa offline.",
+  description: "Simpan dan lihat credentials login secara aman.",
   manifest: "/manifest.json",
 };
 

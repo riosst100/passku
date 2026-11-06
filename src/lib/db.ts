@@ -1,23 +1,15 @@
-import Dexie, { type Table } from "dexie";
-import type { Credential, VaultMeta } from "@/types";
+/**
+ * Passku no longer stores anything offline: the vault lives in memory while unlocked (lib/credentials.ts)
+ * and every unlock goes to the server. Older versions cached the ciphertext, salt and verifier in this
+ * IndexedDB database, which let anyone holding the device guess the master password offline; it is
+ * deleted on every start so devices that still have it get cleaned up.
+ */
+const LEGACY_DB_NAME = "passku-db";
 
-class PasskuDB extends Dexie {
-  vaultMeta!: Table<VaultMeta, string>;
-  credentials!: Table<Credential, string>;
-
-  constructor() {
-    super("passku-db");
-    this.version(1).stores({
-      vaultMeta: "id",
-      credentials: "id, site, updatedAt",
-    });
-  }
-}
-
-export const db = new PasskuDB();
-
-/** Wipes the local offline cache (vault meta + credential ciphertext). Server data is untouched. */
-export async function clearOfflineData(): Promise<void> {
-  await db.vaultMeta.clear();
-  await db.credentials.clear();
+export function purgeLegacyOfflineData(): Promise<void> {
+  if (typeof indexedDB === "undefined") return Promise.resolve();
+  return new Promise((resolve) => {
+    const req = indexedDB.deleteDatabase(LEGACY_DB_NAME);
+    req.onsuccess = req.onerror = req.onblocked = () => resolve();
+  });
 }

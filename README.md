@@ -5,10 +5,10 @@ Password vault pribadi berbasis Next.js. Semua credential dienkripsi di browser 
 ## Fitur
 
 - **Vault terenkripsi end-to-end**: enkripsi/dekripsi terjadi di browser; server hanya menyimpan ciphertext (lihat [src/lib/crypto.ts](src/lib/crypto.ts)).
-- **Offline-first**: credential di-cache di IndexedDB (Dexie) lewat [src/lib/db.ts](src/lib/db.ts), sehingga vault tetap bisa dibuka dan diedit saat offline, lalu disinkronkan otomatis saat online kembali ([src/lib/credentials.ts](src/lib/credentials.ts)).
+- **Online-only, tanpa data offline**: vault hanya ada di memori browser selama terbuka dan hilang saat dikunci atau tab ditutup. Tidak ada yang disimpan di IndexedDB, jadi device yang hilang tidak menyimpan apa pun untuk ditebak master password-nya. Data offline dari versi lama dihapus otomatis ([src/lib/db.ts](src/lib/db.ts)).
 - **Auto-lock**: vault otomatis terkunci setelah idle beberapa saat ([src/components/IdleLockWatcher.tsx](src/components/IdleLockWatcher.tsx)).
 - **Manajemen device & sesi**: setiap login tercatat di server beserta IP dan User-Agent. Lihat daftar device yang sedang login dan blokir akses device tertentu dari panel Devices ([src/components/DevicesPanel.tsx](src/components/DevicesPanel.tsx)). Sesi login baru yang terdeteksi akan memunculkan alert di halaman utama.
-- **PWA-ready**: mendukung install sebagai aplikasi dan bekerja offline lewat service worker ([src/components/ServiceWorkerRegister.tsx](src/components/ServiceWorkerRegister.tsx)).
+- **PWA-ready**: bisa di-install sebagai aplikasi ([src/components/ServiceWorkerRegister.tsx](src/components/ServiceWorkerRegister.tsx)); service worker tidak menyimpan cache.
 
 ## Arsitektur singkat
 

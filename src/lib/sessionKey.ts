@@ -6,16 +6,18 @@ export const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 interface StoredSession {
   jwk: JsonWebKey;
   loadedAt: number;
+  /** Server vault version the key belongs to (a re-encryption elsewhere makes the key stale). */
+  version?: number;
 }
 
 /** Called on login and on every page load/refresh — resets the 5-minute clock. */
-export async function persistSessionKey(key: CryptoKey): Promise<void> {
+export async function persistSessionKey(key: CryptoKey, version: number): Promise<void> {
   const jwk = await exportKeyToJwk(key);
-  const payload: StoredSession = { jwk, loadedAt: Date.now() };
+  const payload: StoredSession = { jwk, loadedAt: Date.now(), version };
   sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 }
 
-export async function restoreSessionKey(): Promise<CryptoKey | null> {
+export async function restoreSessionKey(): Promise<{ key: CryptoKey; version: number } | null> {
   const raw = sessionStorage.getItem(STORAGE_KEY);
   if (!raw) return null;
 
@@ -27,8 +29,9 @@ export async function restoreSessionKey(): Promise<CryptoKey | null> {
     }
     // Reload counts as a fresh page load, so the 5-minute window restarts.
     const key = await importKeyFromJwk(payload.jwk);
-    await persistSessionKey(key);
-    return key;
+    const version = payload.version ?? 1;
+    await persistSessionKey(key, version);
+    return { key, version };
   } catch {
     sessionStorage.removeItem(STORAGE_KEY);
     return null;

@@ -156,7 +156,7 @@ export function VaultGate({ children }: { children: React.ReactNode }) {
             ? "Buat master password untuk mengenkripsi vault kamu. Password ini tidak disimpan di mana pun — kalau lupa, data tidak bisa dipulihkan."
             : online
               ? "Masukkan master password untuk membuka vault."
-              : "Tidak ada koneksi internet. Kamu tetap bisa membuka vault dari data yang sudah tersimpan di device ini."}
+              : "Tidak ada koneksi internet. Passku butuh koneksi untuk membuka vault."}
         </p>
 
         <div className="space-y-3">

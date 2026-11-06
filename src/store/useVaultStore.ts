@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { db, clearOfflineData } from "@/lib/db";
+import { purgeLegacyOfflineData } from "@/lib/db";
 import {
   deriveKeyFromPassword,
   deriveNewKey,
@@ -10,8 +10,16 @@ import {
 } from "@/lib/crypto";
 import { LEGACY_ITERATIONS, TARGET_ITERATIONS } from "@/lib/kdf";
 import { persistSessionKey, restoreSessionKey, clearSessionKey } from "@/lib/sessionKey";
-import { syncCredentials, VAULT_STALE_EVENT } from "@/lib/credentials";
-import type { CredentialPayload, VaultMeta } from "@/types";
+import {
+  cachedCredentials,
+  clearCredentialCache,
+  getVaultVersion,
+  replaceCachedCredentials,
+  setVaultVersion,
+  syncCredentials,
+  VAULT_STALE_EVENT,
+} from "@/lib/credentials";
+import type { CredentialPayload } from "@/types";
 
 interface VaultState {
   status: "checking" | "needs-setup" | "locked" | "unlocked";
@@ -22,7 +30,6 @@ interface VaultState {
   setupMasterPassword: (password: string) => Promise<void>;
   unlock: (password: string) => Promise<boolean>;
   lock: () => void;
-  wipeOfflineData: () => Promise<void>;
 }
 
 /** What GET /api/vault-meta gives anyone: enough to derive the auth secret, nothing to test guesses with. */
@@ -39,6 +46,8 @@ type AuthResult =
   | { ok: true; meta: FullMeta }
   | { ok: false; reason: "invalid" }
   | { ok: false; reason: "rate-limited"; retryAfter: number };
+
+const OFFLINE_MESSAGE = "Tidak bisa terhubung ke server. Passku butuh koneksi internet untuk membuka vault.";
 
 async function fetchPublicMeta(): Promise<PublicMeta | null> {
   const res = await fetch("/api/vault-meta");
@@ -68,33 +77,19 @@ async function authenticate(password: string, meta: PublicMeta): Promise<AuthRes
   };
 }
 
-async function cacheMeta(meta: FullMeta): Promise<void> {
-  await db.vaultMeta.put({ id: "vault-meta", ...meta });
-}
-
-function cachedToFull(meta: VaultMeta): FullMeta {
-  return {
-    saltB64: meta.saltB64,
-    verifier: meta.verifier,
-    iterations: meta.iterations ?? LEGACY_ITERATIONS,
-    version: meta.version ?? 1,
-  };
-}
-
 function rateLimitMessage(retryAfter: number): string {
   const minutes = Math.ceil(retryAfter / 60);
   return `Terlalu banyak percobaan password salah. Coba lagi dalam ${minutes} menit.`;
 }
 
 /**
- * One-time upgrade after an online unlock: re-encrypts the vault with a fresh salt at
- * TARGET_ITERATIONS and moves plaintext site names into the encrypted payload. The server
- * swaps everything in one transaction (POST /api/vault-meta/rekey) and refuses if anything
- * changed meanwhile; then this simply runs again on the next unlock. Returns the key to use.
+ * One-time upgrade after unlock: re-encrypts the vault with a fresh salt at TARGET_ITERATIONS
+ * and moves plaintext site names into the encrypted payload. The server swaps everything in one
+ * transaction (POST /api/vault-meta/rekey) and refuses if anything changed meanwhile; then this
+ * simply runs again on the next unlock. Returns the key to use.
  */
 async function upgradeVaultIfNeeded(password: string, key: CryptoKey, meta: FullMeta): Promise<CryptoKey> {
-  const rows = await db.credentials.toArray();
-  if (rows.some((r) => r.pendingOp)) return key; // unsynced offline edits: upgrade after they're pushed
+  const rows = cachedCredentials();
   if (meta.iterations >= TARGET_ITERATIONS && rows.every((r) => r.site === "")) return key;
 
   try {
@@ -125,11 +120,9 @@ async function upgradeVaultIfNeeded(password: string, key: CryptoKey, meta: Full
     const { version } = (await res.json()) as { version: number };
 
     const byId = new Map(credentials.map((c) => [c.id, c.data]));
-    await db.transaction("rw", db.vaultMeta, db.credentials, async () => {
-      await db.vaultMeta.put({ id: "vault-meta", saltB64, verifier, iterations, version });
-      await db.credentials.bulkPut(rows.map((r) => ({ ...r, site: "", data: byId.get(r.id)! })));
-    });
-    await persistSessionKey(newKey);
+    replaceCachedCredentials(rows.map((r) => ({ ...r, site: "", data: byId.get(r.id)! })));
+    setVaultVersion(version);
+    await persistSessionKey(newKey, version);
     return newKey;
   } catch {
     // Network error or unreadable entry: keep using the current key, retry on the next unlock.
@@ -144,36 +137,29 @@ export const useVaultStore = create<VaultState>((set) => ({
   syncing: false,
 
   init: async () => {
-    const restoredKey = await restoreSessionKey();
-    if (restoredKey) {
+    // Older versions kept the vault in IndexedDB for offline use; remove it from this device.
+    await purgeLegacyOfflineData();
+
+    const restored = await restoreSessionKey();
+    if (restored) {
       set({ syncing: true });
-      if ((await syncCredentials()) === "stale") return; // the stale handler below locked the vault
-      set({ status: "unlocked", key: restoredKey, error: null, syncing: false });
-      return;
+      setVaultVersion(restored.version);
+      const result = await syncCredentials();
+      if (result === "stale") return; // the stale handler below locked the vault
+      if (result === "ok") {
+        set({ status: "unlocked", key: restored.key, error: null, syncing: false });
+        return;
+      }
+      clearSessionKey();
+      set({ syncing: false });
     }
 
     try {
       const publicMeta = await fetchPublicMeta();
       set({ status: publicMeta ? "locked" : "needs-setup", error: null });
-      return;
     } catch {
-      // Server unreachable: fall back to the local cache so the vault can
-      // still be unlocked offline (view-only until back online).
+      set({ status: "locked", error: OFFLINE_MESSAGE });
     }
-
-    const localMeta = await db.vaultMeta.get("vault-meta");
-    if (localMeta) {
-      set({
-        status: "locked",
-        error: "Offline: menampilkan data dari cache lokal. Sinkronisasi akan lanjut saat online.",
-      });
-      return;
-    }
-
-    set({
-      status: "locked",
-      error: "Tidak bisa terhubung ke server dan belum ada data lokal. Sambungkan ke internet.",
-    });
   },
 
   setupMasterPassword: async (password: string) => {
@@ -185,20 +171,20 @@ export const useVaultStore = create<VaultState>((set) => ({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ saltB64, verifier, authSecret, iterations }),
-    });
-    if (!res.ok) {
+    }).catch(() => null);
+    if (!res?.ok) {
       set({ error: "Gagal setup vault di server. Coba lagi." });
       return;
     }
 
-    const auth = await authenticate(password, { saltB64, iterations, version: 1 });
-    if (!auth.ok) {
+    const auth = await authenticate(password, { saltB64, iterations, version: 1 }).catch(() => null);
+    if (!auth?.ok) {
       set({ status: "locked", error: "Setup berhasil tapi login otomatis gagal. Coba unlock manual." });
       return;
     }
-    await cacheMeta(auth.meta);
 
-    await persistSessionKey(key);
+    setVaultVersion(auth.meta.version);
+    await persistSessionKey(key, auth.meta.version);
     set({ syncing: true });
     await syncCredentials();
     set({ status: "unlocked", key, error: null, syncing: false });
@@ -206,8 +192,6 @@ export const useVaultStore = create<VaultState>((set) => ({
 
   unlock: async (password: string) => {
     let meta: FullMeta;
-    let online = true;
-
     try {
       const publicMeta = await fetchPublicMeta();
       if (!publicMeta) {
@@ -223,14 +207,8 @@ export const useVaultStore = create<VaultState>((set) => ({
       }
       meta = auth.meta;
     } catch {
-      // Offline: check the password against the verifier cached at the last online unlock.
-      online = false;
-      const cached = await db.vaultMeta.get("vault-meta");
-      if (!cached) {
-        set({ error: "Tidak bisa terhubung ke server dan belum ada data lokal. Sambungkan ke internet." });
-        return false;
-      }
-      meta = cachedToFull(cached);
+      set({ error: OFFLINE_MESSAGE });
+      return false;
     }
 
     try {
@@ -238,17 +216,17 @@ export const useVaultStore = create<VaultState>((set) => ({
       const check = await decryptString(key, meta.verifier);
       if (check !== VERIFIER_PLAINTEXT) throw new Error("mismatch");
 
-      if (online) {
-        const cached = await db.vaultMeta.get("vault-meta");
-        // Re-encrypted on another device since this cache was written: its ciphertext is unreadable now.
-        if (cached && (cached.version ?? 1) !== meta.version) await db.credentials.clear();
-        await cacheMeta(meta);
-      }
-
-      await persistSessionKey(key);
+      setVaultVersion(meta.version);
       set({ syncing: true });
-      if ((await syncCredentials()) === "stale") return false;
-      if (online) key = await upgradeVaultIfNeeded(password, key, meta);
+      const result = await syncCredentials();
+      if (result === "stale") return false;
+      if (result === "offline") {
+        set({ error: OFFLINE_MESSAGE, syncing: false });
+        return false;
+      }
+      key = await upgradeVaultIfNeeded(password, key, meta);
+      // After an upgrade both the key and the version are new.
+      await persistSessionKey(key, getVaultVersion());
       set({ status: "unlocked", key, error: null, syncing: false });
       return true;
     } catch {
@@ -260,29 +238,22 @@ export const useVaultStore = create<VaultState>((set) => ({
   lock: () => {
     fetch("/api/auth", { method: "DELETE" }).catch(() => {});
     clearSessionKey();
+    clearCredentialCache();
     set({ status: "locked", key: null });
-  },
-
-  wipeOfflineData: async () => {
-    fetch("/api/auth", { method: "DELETE" }).catch(() => {});
-    clearSessionKey();
-    await clearOfflineData();
-    set({ status: "checking", key: null, error: null });
-    await useVaultStore.getState().init();
   },
 }));
 
-// The vault was re-encrypted on another device: this device's key and cached ciphertext are
-// outdated. Lock and drop the cache; unlocking again fetches the new key material.
+// The vault was re-encrypted on another device: this device's key is outdated.
+// Lock and drop the in-memory copy; unlocking again fetches the new key material.
 if (typeof window !== "undefined") {
   window.addEventListener(VAULT_STALE_EVENT, () => {
     clearSessionKey();
+    clearCredentialCache();
     useVaultStore.setState({
       status: "locked",
       key: null,
       syncing: false,
       error: "Vault dienkripsi ulang di device lain. Masukkan master password lagi.",
     });
-    void db.credentials.clear();
   });
 }
