@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import db from "@/lib/server/db";
+import { getVaultMeta } from "@/lib/server/vault";
+import { clearLoginFailures, loginRetryAfter, recordLoginFailure } from "@/lib/server/rateLimit";
 import { createSessionToken, getSessionIdFromToken, revokeSession, SESSION_COOKIE } from "@/lib/server/session";
 import { sha256Hex, safeEqual } from "@/lib/server/hash";
 
@@ -9,21 +10,25 @@ function clientIp(req: NextRequest): string | null {
   return req.headers.get("x-real-ip");
 }
 
-interface VaultMetaRow {
-  id: string;
-  auth_secret_hash: string;
-}
-
 /**
  * The client derives authSecret from the master password via PBKDF2 (separate
  * from the encryption key, so this value can't be used to decrypt the vault).
  * The server only ever stores/compares its SHA-256 hash.
+ *
+ * Failed attempts are rate limited (lib/server/rateLimit.ts). On success the response carries
+ * the vault verifier, which the client needs to check its decryption key; it is never public.
  */
 export async function POST(req: NextRequest) {
-  const row = db
-    .prepare("SELECT id, auth_secret_hash FROM vault_meta WHERE id = 'vault-meta'")
-    .get() as VaultMetaRow | undefined;
+  const ip = clientIp(req);
+  const retryAfter = loginRetryAfter(ip);
+  if (retryAfter > 0) {
+    return NextResponse.json(
+      { error: "Too many attempts", retryAfter },
+      { status: 429, headers: { "Retry-After": String(retryAfter) } }
+    );
+  }
 
+  const row = getVaultMeta();
   if (!row) {
     return NextResponse.json({ error: "Vault not set up" }, { status: 404 });
   }
@@ -35,11 +40,19 @@ export async function POST(req: NextRequest) {
 
   const candidateHash = sha256Hex(authSecret);
   if (!safeEqual(candidateHash, row.auth_secret_hash)) {
+    recordLoginFailure(ip);
     return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
   }
+  clearLoginFailures(ip);
 
-  const token = await createSessionToken(clientIp(req), req.headers.get("user-agent"));
-  const res = NextResponse.json({ ok: true });
+  const token = await createSessionToken(ip, req.headers.get("user-agent"));
+  const res = NextResponse.json({
+    ok: true,
+    saltB64: row.salt_b64,
+    iterations: row.kdf_iterations,
+    version: row.version,
+    verifier: row.verifier,
+  });
   res.cookies.set(SESSION_COOKIE, token, {
     httpOnly: true,
     secure: true,

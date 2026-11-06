@@ -36,4 +36,15 @@ db.exec(`
   );
 `);
 
+// Added later: vaults created before these columns existed used 250k iterations and are version 1.
+const vaultMetaColumns = (db.prepare("PRAGMA table_info(vault_meta)").all() as { name: string }[]).map(
+  (c) => c.name
+);
+if (!vaultMetaColumns.includes("kdf_iterations")) {
+  db.exec("ALTER TABLE vault_meta ADD COLUMN kdf_iterations INTEGER NOT NULL DEFAULT 250000");
+}
+if (!vaultMetaColumns.includes("version")) {
+  db.exec("ALTER TABLE vault_meta ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
+}
+
 export default db;

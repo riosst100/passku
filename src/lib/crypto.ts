@@ -1,4 +1,4 @@
-const PBKDF2_ITERATIONS = 250_000;
+import { TARGET_ITERATIONS } from "@/lib/kdf";
 
 function bufToBase64(buf: ArrayBufferLike): string {
   return btoa(String.fromCharCode(...new Uint8Array(buf)));
@@ -8,7 +8,7 @@ function base64ToBuf(b64: string): ArrayBuffer {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)).buffer as ArrayBuffer;
 }
 
-async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
+async function deriveKey(password: string, salt: Uint8Array, iterations: number): Promise<CryptoKey> {
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(password),
@@ -21,7 +21,7 @@ async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey>
     {
       name: "PBKDF2",
       salt: salt as BufferSource,
-      iterations: PBKDF2_ITERATIONS,
+      iterations,
       hash: "SHA-256",
     },
     keyMaterial,
@@ -45,18 +45,20 @@ export function generateSalt(): Uint8Array {
 
 export async function deriveKeyFromPassword(
   password: string,
-  saltB64: string
+  saltB64: string,
+  iterations: number
 ): Promise<CryptoKey> {
   const salt = new Uint8Array(base64ToBuf(saltB64));
-  return deriveKey(password, salt);
+  return deriveKey(password, salt, iterations);
 }
 
+/** New random salt + key at the current iteration count (vault setup and re-encryption). */
 export async function deriveNewKey(
   password: string
-): Promise<{ key: CryptoKey; saltB64: string }> {
+): Promise<{ key: CryptoKey; saltB64: string; iterations: number }> {
   const salt = generateSalt();
-  const key = await deriveKey(password, salt);
-  return { key, saltB64: bufToBase64(salt.buffer) };
+  const key = await deriveKey(password, salt, TARGET_ITERATIONS);
+  return { key, saltB64: bufToBase64(salt.buffer), iterations: TARGET_ITERATIONS };
 }
 
 /**
@@ -65,7 +67,11 @@ export async function deriveNewKey(
  * key itself. Uses a different PBKDF2 salt (derived deterministically from
  * the encryption salt) so it can be recomputed from saltB64 alone.
  */
-export async function deriveAuthSecret(password: string, saltB64: string): Promise<string> {
+export async function deriveAuthSecret(
+  password: string,
+  saltB64: string,
+  iterations: number
+): Promise<string> {
   const encSalt = new Uint8Array(base64ToBuf(saltB64));
   const authSaltInput = new Uint8Array(encSalt.length + 5);
   authSaltInput.set(encSalt);
@@ -83,7 +89,7 @@ export async function deriveAuthSecret(password: string, saltB64: string): Promi
     {
       name: "PBKDF2",
       salt: authSalt as BufferSource,
-      iterations: PBKDF2_ITERATIONS,
+      iterations,
       hash: "SHA-256",
     },
     keyMaterial,

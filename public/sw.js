@@ -1,4 +1,4 @@
-const CACHE_NAME = "passku-shell-v4";
+const CACHE_NAME = "passku-shell-v5";
 const SHELL_URLS = ["/", "/manifest.json", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
