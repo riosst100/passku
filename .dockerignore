@@ -1,0 +1,6 @@
+# Never bake secrets or the vault database into the image.
+.env*
+data
+.git
+node_modules
+.next

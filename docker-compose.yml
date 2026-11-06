@@ -1,0 +1,18 @@
+# Passku production: https://passku.inovasionline.com (Caddy -> 127.0.0.1:3060).
+#   ./deploy.sh   (pull master, rebuild, restart)
+name: passku
+services:
+  passku:
+    build: .
+    image: passku:prod
+    container_name: passku
+    restart: unless-stopped
+    user: "1000:1000"
+    env_file: .env          # PASSKU_SESSION_SECRET (not in git)
+    volumes:
+      - ./data:/app/data    # SQLite vault (passku.db): back this up
+    ports:
+      - "127.0.0.1:3060:3000"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

@@ -64,10 +64,13 @@ Database SQLite (`passku.db`) berisi vault metadata, credential terenkripsi, dan
 
 ## Deployment
 
-Repo ini memakai GitHub Actions ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)) untuk deploy otomatis ke server via SSH setiap kali ada push ke branch `master`. Workflow membutuhkan GitHub Secrets berikut:
+Production (https://passku.inovasionline.com) berjalan di Docker di server, dari folder `/var/www/passku`:
 
-- `DEPLOY_HOST`
-- `DEPLOY_USER`
-- `DEPLOY_SSH_KEY`
+- `Dockerfile` + `docker-compose.yml`: container `passku` di `127.0.0.1:3060`, di belakang Caddy (HTTPS).
+- `.env` (tidak di git): `PASSKU_SESSION_SECRET`.
+- `data/` (tidak di git): database SQLite vault, di-mount ke container. Wajib di-backup.
+- `./deploy.sh`: pull `master`, build ulang image, restart container.
 
-Server tujuan menjalankan aplikasi dengan PM2 (`pm2 restart passku`).
+Setiap push ke `master` menjalankan `./deploy.sh` di server lewat GitHub Actions ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)).
+Secret yang dipakai: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`. Di server, deploy key ini dibatasi
+(forced command di `~/.ssh/authorized_keys`), jadi hanya bisa menjalankan deploy.
