@@ -1,12 +1,15 @@
 # Passku production: https://passku.inovasionline.com (Caddy -> 127.0.0.1:3060).
-#   ./deploy.sh   (pull master, rebuild, restart)
+#   ./deploy.sh   (pull master + the image CI built on ghcr.io, restart; run by hand it builds here)
+# The image is built by GitHub Actions so this 4GB server, shared with other stacks, never runs a build.
 name: passku
 services:
   passku:
     build: .
-    image: passku:prod
+    image: ghcr.io/riosst100/passku:latest
     container_name: passku
     restart: unless-stopped
+    # Caps this container so a runaway process can't OOM the other stacks on this server.
+    mem_limit: 512m
     user: "1000:1000"
     env_file: .env          # PASSKU_SESSION_SECRET (not in git)
     volumes:

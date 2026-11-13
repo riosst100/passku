@@ -1,6 +1,8 @@
 name: Deploy to production
 
-# Push to master -> the server (Docker, /var/www/passku) runs ./deploy.sh: pull, rebuild, restart.
+# Push to master -> build the image here and push it to ghcr.io, then the server (Docker,
+# /var/www/passku) runs ./deploy.sh: pull master + that image, restart. The server never builds
+# (4GB RAM shared with other stacks: builds there caused OOM kills).
 on:
   push:
     branches: [master]
@@ -13,8 +15,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
+    name: Build image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/riosst100/passku:latest  # same as `image:` in docker-compose.yml
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to VPS
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Deploy over SSH
         env:
@@ -22,9 +51,13 @@ jobs:
           KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           install -m 700 -d ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           # On the server this key may only run deploy.sh (forced command in authorized_keys).
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 "$USER@$HOST" deploy
+          # stdin = user + this job's token (packages: read, expires with the job) so the server can pull.
+          printf '%s\n%s\n' "$GHCR_USER" "$GHCR_TOKEN" | ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=30 "$USER@$HOST" deploy
