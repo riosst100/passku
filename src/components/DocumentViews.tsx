@@ -3,8 +3,16 @@
 import { useEffect, useRef, useState } from "react";
 import { useVaultStore } from "@/store/useVaultStore";
 import { deleteCredential, listItems, saveItem } from "@/lib/credentials";
-import { downloadFile, formatBytes, MAX_FILE_BYTES, uploadFile } from "@/lib/files";
-import type { FileDocPayload, TextDocPayload } from "@/types";
+import {
+  deleteFile,
+  downloadFile,
+  formatBytes,
+  MAX_FILE_BYTES,
+  normalizeDoc,
+  StaleError,
+  uploadFile,
+} from "@/lib/files";
+import type { FileDocPayload, LegacyFilePayload, StoredFile, TextDocPayload } from "@/types";
 
 const INPUT =
   "w-full rounded-xl border border-neutral-300 bg-white px-3.5 py-2.5 text-sm text-neutral-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/15 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100 dark:focus:border-indigo-400 dark:focus:ring-indigo-400/15";
@@ -365,23 +373,90 @@ function TextDocForm({
 
 /* ───────────────────────── Documents (files) ───────────────────────── */
 
-type FileItem = { id: string; payload: FileDocPayload; updatedAt: number };
+type DocItem = { id: string; payload: FileDocPayload; updatedAt: number };
+
+const ChevronIcon = ({ left }: { left?: boolean }) => (
+  <Svg size={20}>
+    <path d={left ? "m15 18-6-6 6-6" : "m9 18 6-6-6-6"} />
+  </Svg>
+);
+const XIcon = () => (
+  <Svg size={14}>
+    <path d="M18 6 6 18M6 6l12 12" />
+  </Svg>
+);
+
+function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** Thumbnail from the stored preview; images uploaded without one are decrypted on demand. */
+function Thumb({ file, className, onClick }: { file: StoredFile; className: string; onClick?: () => void }) {
+  const [lazyUrl, setLazyUrl] = useState<string | null>(null);
+  const isImage = file.mime.startsWith("image/");
+
+  useEffect(() => {
+    if (file.thumb || !isImage) return;
+    let url: string | null = null;
+    let cancelled = false;
+    downloadFile(file)
+      .then((blob) => {
+        if (cancelled) return;
+        url = URL.createObjectURL(blob);
+        setLazyUrl(url);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [file, isImage]);
+
+  const src = file.thumb ?? lazyUrl;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={file.name}
+      className={`${className} flex shrink-0 items-center justify-center overflow-hidden rounded-lg border border-neutral-200 bg-neutral-100 text-neutral-400 dark:border-neutral-700 dark:bg-neutral-800`}
+    >
+      {src ? (
+        // eslint-disable-next-line @next/next/no-img-element -- local data/blob URL
+        <img src={src} alt={file.name} className="h-full w-full object-cover" />
+      ) : (
+        <span className="flex flex-col items-center gap-0.5 px-1">
+          <FileIcon />
+          <span className="max-w-full truncate text-[9px] font-medium uppercase">
+            {file.name.split(".").pop()}
+          </span>
+        </span>
+      )}
+    </button>
+  );
+}
 
 export function DocumentsView({ refreshToken, onCount }: { refreshToken: number; onCount: (n: number) => void }) {
   const { key } = useVaultStore();
-  const [items, setItems] = useState<FileItem[]>([]);
+  const [items, setItems] = useState<DocItem[]>([]);
   const [query, setQuery] = useState("");
-  const [uploading, setUploading] = useState(false);
-  const [editing, setEditing] = useState<FileItem | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [preview, setPreview] = useState<{ item: FileItem; url: string } | null>(null);
+  const [editing, setEditing] = useState<DocItem | "new" | null>(null);
+  const [gallery, setGallery] = useState<{ item: DocItem; index: number } | null>(null);
 
   const refresh = async () => {
     if (!key) return;
     const all = await listItems(key);
     const list = all
-      .filter((i): i is typeof i & { payload: FileDocPayload } => "type" in i.payload && i.payload.type === "file")
-      .sort(byName((i) => i.payload.name));
+      .flatMap((i) =>
+        "type" in i.payload && (i.payload.type === "doc" || i.payload.type === "file")
+          ? [{ id: i.id, updatedAt: i.updatedAt, payload: normalizeDoc(i.id, i.payload as FileDocPayload | LegacyFilePayload) }]
+          : []
+      )
+      .sort(byName((i) => i.payload.title));
     setItems(list);
     onCount(list.length);
   };
@@ -392,49 +467,13 @@ export function DocumentsView({ refreshToken, onCount }: { refreshToken: number;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, refreshToken]);
 
-  useEffect(() => () => {
-    if (preview) URL.revokeObjectURL(preview.url);
-  }, [preview]);
-
-  const fetchBlob = async (item: FileItem): Promise<Blob | null> => {
-    setBusyId(item.id);
-    try {
-      return await downloadFile(item.id, item.payload);
-    } catch (e) {
-      window.alert((e as Error).message);
-      return null;
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const view = async (item: FileItem) => {
-    const blob = await fetchBlob(item);
-    if (!blob) return;
-    const url = URL.createObjectURL(blob);
-    if (item.payload.mime.startsWith("image/")) {
-      setPreview({ item, url });
-    } else {
-      window.open(url, "_blank", "noopener");
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    }
-  };
-
-  const download = async (item: FileItem) => {
-    const blob = await fetchBlob(item);
-    if (!blob) return;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = item.payload.name;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
-  };
-
   const q = query.trim().toLowerCase();
   const filtered = items.filter(
     (i) =>
-      !q || i.payload.name.toLowerCase().includes(q) || (i.payload.notes ?? "").toLowerCase().includes(q)
+      !q ||
+      i.payload.title.toLowerCase().includes(q) ||
+      (i.payload.notes ?? "").toLowerCase().includes(q) ||
+      i.payload.files.some((f) => f.name.toLowerCase().includes(q))
   );
 
   return (
@@ -442,81 +481,73 @@ export function DocumentsView({ refreshToken, onCount }: { refreshToken: number;
       <SearchBar
         query={query}
         setQuery={setQuery}
-        placeholder="Cari nama file atau catatan..."
-        onAdd={() => setUploading(true)}
-        addLabel="Upload"
+        placeholder="Cari dokumen, nama file, atau catatan..."
+        onAdd={() => setEditing("new")}
+        addLabel="Tambah"
       />
       <ul className="space-y-2">
-        {filtered.map((item) => (
-          <li key={item.id} className={CARD}>
-            <div className="flex items-start gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 to-indigo-500 text-white shadow-sm">
-                <FileIcon />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-neutral-900 dark:text-neutral-100">
-                  {item.payload.name}
-                </p>
-                <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
-                  {formatBytes(item.payload.size)} · {item.payload.mime}
-                </p>
-                {item.payload.notes && (
-                  <p className="mt-1 whitespace-pre-wrap break-words text-xs text-neutral-500 dark:text-neutral-400">
-                    {item.payload.notes}
+        {filtered.map((item) => {
+          const files = item.payload.files;
+          const totalSize = files.reduce((n, f) => n + f.size, 0);
+          return (
+            <li key={item.id} className={CARD}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-neutral-900 dark:text-neutral-100">
+                    {item.payload.title}
                   </p>
-                )}
+                  <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
+                    {files.length} file · {formatBytes(totalSize)}
+                  </p>
+                  {item.payload.notes && (
+                    <p className="mt-1 whitespace-pre-wrap break-words text-xs text-neutral-500 dark:text-neutral-400">
+                      {item.payload.notes}
+                    </p>
+                  )}
+                </div>
+                <div className="flex shrink-0 gap-1">
+                  <button onClick={() => setEditing(item)} title="Edit" className={ICON_BTN}>
+                    <PencilIcon />
+                  </button>
+                  <button
+                    onClick={async () => (await confirmDelete(item.id, "dokumen beserta semua file-nya")) && refresh()}
+                    title="Hapus"
+                    className={DANGER_BTN}
+                  >
+                    <TrashIcon />
+                  </button>
+                </div>
               </div>
-              <div className="flex shrink-0 gap-1">
-                {busyId === item.id ? (
-                  <span className="m-2 h-4 w-4 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-600" />
-                ) : (
-                  <>
-                    <button onClick={() => view(item)} title="Lihat" className={ICON_BTN}>
-                      <EyeIcon />
-                    </button>
-                    <button onClick={() => download(item)} title="Download" className={ICON_BTN}>
-                      <DownloadIcon />
-                    </button>
-                  </>
-                )}
-                <button onClick={() => setEditing(item)} title="Edit catatan" className={ICON_BTN}>
-                  <PencilIcon />
-                </button>
-                <button
-                  onClick={async () => (await confirmDelete(item.id, "dokumen")) && refresh()}
-                  title="Hapus"
-                  className={DANGER_BTN}
-                >
-                  <TrashIcon />
-                </button>
-              </div>
-            </div>
-          </li>
-        ))}
+              {files.length > 0 && (
+                <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                  {files.map((f, index) => (
+                    <Thumb
+                      key={f.id}
+                      file={f}
+                      className="h-20 w-20 transition hover:opacity-80"
+                      onClick={() => setGallery({ item, index })}
+                    />
+                  ))}
+                </div>
+              )}
+            </li>
+          );
+        })}
         {filtered.length === 0 && (
           <Empty
             icon={<FileIcon />}
             text={
               items.length === 0
-                ? "Belum ada dokumen. Upload foto, PDF, atau file lain (maks. 10 MB)."
+                ? "Belum ada dokumen. Tambahkan mis. KTP dengan beberapa foto, PDF, dll."
                 : "Tidak ada hasil untuk pencarian ini."
             }
           />
         )}
       </ul>
 
-      {uploading && (
-        <UploadForm
-          onClose={() => setUploading(false)}
-          onSaved={async () => {
-            setUploading(false);
-            await refresh();
-          }}
-        />
-      )}
       {editing && (
-        <FileEditForm
-          item={editing}
+        <DocForm
+          initial={editing === "new" ? undefined : editing}
           onClose={() => setEditing(null)}
           onSaved={async () => {
             setEditing(null);
@@ -524,46 +555,207 @@ export function DocumentsView({ refreshToken, onCount }: { refreshToken: number;
           }}
         />
       )}
-      {preview && (
-        <Modal onClose={() => setPreview(null)} wide>
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <p className="truncate text-sm font-medium text-neutral-900 dark:text-neutral-100">
-              {preview.item.payload.name}
-            </p>
-            <button onClick={() => setPreview(null)} className={SECONDARY_BTN + " !flex-none"}>
-              Tutup
-            </button>
-          </div>
-          {/* eslint-disable-next-line @next/next/no-img-element -- decrypted blob URL */}
-          <img src={preview.url} alt={preview.item.payload.name} className="mx-auto max-h-[70dvh] rounded-lg" />
-        </Modal>
+      {gallery && (
+        <Gallery
+          files={gallery.item.payload.files}
+          title={gallery.item.payload.title}
+          start={gallery.index}
+          onClose={() => setGallery(null)}
+        />
       )}
     </>
   );
 }
 
-function UploadForm({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+function Gallery({
+  files,
+  title,
+  start,
+  onClose,
+}: {
+  files: StoredFile[];
+  title: string;
+  start: number;
+  onClose: () => void;
+}) {
+  const [index, setIndex] = useState(start);
+  const [loaded, setLoaded] = useState<{ id: string; blob: Blob; url: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const file = files[index];
+  const current = loaded?.id === file.id ? loaded : null;
+
+  useEffect(() => {
+    let url: string | null = null;
+    let cancelled = false;
+    downloadFile(file)
+      .then((blob) => {
+        if (cancelled) return;
+        url = URL.createObjectURL(blob);
+        setError(null);
+        setLoaded({ id: file.id, blob, url });
+      })
+      .catch((e: Error) => !cancelled && setError(e.message));
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [file]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowLeft") setIndex((i) => (i - 1 + files.length) % files.length);
+      if (e.key === "ArrowRight") setIndex((i) => (i + 1) % files.length);
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [files.length, onClose]);
+
+  const isImage = file.mime.startsWith("image/");
+
+  return (
+    <Modal onClose={onClose} wide>
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-neutral-900 dark:text-neutral-100">{title}</p>
+          <p className="truncate text-xs text-neutral-500 dark:text-neutral-400">
+            {index + 1}/{files.length} · {file.name} · {formatBytes(file.size)}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-1">
+          <button
+            onClick={() => current && saveBlob(current.blob, file.name)}
+            disabled={!current}
+            title="Download"
+            className={ICON_BTN}
+          >
+            <DownloadIcon />
+          </button>
+          <button onClick={onClose} title="Tutup" className={ICON_BTN}>
+            <XIcon />
+          </button>
+        </div>
+      </div>
+
+      <div className="relative flex min-h-[40dvh] items-center justify-center rounded-xl bg-neutral-100 dark:bg-neutral-950">
+        {error ? (
+          <p className="text-sm text-red-600">{error}</p>
+        ) : !current ? (
+          <span className="h-6 w-6 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-600" />
+        ) : isImage ? (
+          // eslint-disable-next-line @next/next/no-img-element -- decrypted blob URL
+          <img src={current.url} alt={file.name} className="max-h-[65dvh] max-w-full rounded-lg object-contain" />
+        ) : (
+          <div className="flex flex-col items-center gap-3 p-8 text-neutral-500">
+            <FileIcon />
+            <button onClick={() => window.open(current.url, "_blank", "noopener")} className={PRIMARY_BTN}>
+              Buka file
+            </button>
+          </div>
+        )}
+        {files.length > 1 && (
+          <>
+            <button
+              onClick={() => setIndex((i) => (i - 1 + files.length) % files.length)}
+              className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-1.5 text-white hover:bg-black/60"
+              title="Sebelumnya"
+            >
+              <ChevronIcon left />
+            </button>
+            <button
+              onClick={() => setIndex((i) => (i + 1) % files.length)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-1.5 text-white hover:bg-black/60"
+              title="Berikutnya"
+            >
+              <ChevronIcon />
+            </button>
+          </>
+        )}
+      </div>
+
+      {files.length > 1 && (
+        <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+          {files.map((f, i) => (
+            <Thumb
+              key={f.id}
+              file={f}
+              onClick={() => setIndex(i)}
+              className={`h-14 w-14 ${i === index ? "ring-2 ring-indigo-500" : "opacity-70 hover:opacity-100"}`}
+            />
+          ))}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+type Pending = { key: string; file: File; preview?: string };
+
+function DocForm({ initial, onClose, onSaved }: { initial?: DocItem; onClose: () => void; onSaved: () => void }) {
   const { key } = useVaultStore();
-  const [files, setFiles] = useState<File[]>([]);
-  const [notes, setNotes] = useState("");
+  const [title, setTitle] = useState(initial?.payload.title ?? "");
+  const [notes, setNotes] = useState(initial?.payload.notes ?? "");
+  const [kept, setKept] = useState<StoredFile[]>(initial?.payload.files ?? []);
+  const [pending, setPending] = useState<Pending[]>([]);
   const [saving, setSaving] = useState(false);
   const [progress, setProgress] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const pendingRef = useRef(pending);
+  useEffect(() => {
+    pendingRef.current = pending;
+  }, [pending]);
 
-  const tooBig = files.filter((f) => f.size > MAX_FILE_BYTES);
+  useEffect(
+    () => () => pendingRef.current.forEach((p) => p.preview && URL.revokeObjectURL(p.preview)),
+    []
+  );
+
+  const addFiles = (list: FileList | null) => {
+    const added = Array.from(list ?? []).map((file) => ({
+      key: crypto.randomUUID(),
+      file,
+      preview: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+    }));
+    setPending((prev) => [...prev, ...added]);
+    if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const removePending = (k: string) =>
+    setPending((prev) => {
+      const p = prev.find((x) => x.key === k);
+      if (p?.preview) URL.revokeObjectURL(p.preview);
+      return prev.filter((x) => x.key !== k);
+    });
+
+  const tooBig = pending.some((p) => p.file.size > MAX_FILE_BYTES);
+  const total = kept.length + pending.length;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!key || files.length === 0 || tooBig.length > 0) return;
+    if (!key || !title.trim() || total === 0 || tooBig) return;
     setSaving(true);
+    const itemId = initial?.id ?? crypto.randomUUID();
+    const uploaded: StoredFile[] = [];
     try {
-      for (let i = 0; i < files.length; i++) {
-        setProgress(`${i + 1}/${files.length}`);
-        await uploadFile(key, files[i], notes.trim());
+      for (let i = 0; i < pending.length; i++) {
+        setProgress(` ${i + 1}/${pending.length}`);
+        uploaded.push(await uploadFile(itemId, pending[i].file));
       }
+      setProgress("");
+      await saveItem(
+        key,
+        { type: "doc", title: title.trim(), notes: notes.trim() || undefined, files: [...kept, ...uploaded] },
+        itemId
+      );
+      const keptIds = new Set(kept.map((f) => f.id));
+      await Promise.all(
+        (initial?.payload.files ?? []).filter((f) => !keptIds.has(f.id) && f.id !== itemId).map((f) => deleteFile(f.id))
+      );
       onSaved();
     } catch (err) {
-      window.alert((err as Error).message);
+      // Files uploaded before the failure are not referenced by the vault: remove them again.
+      await Promise.all(uploaded.map((f) => deleteFile(f.id)));
+      if (!(err instanceof StaleError)) window.alert((err as Error).message);
     } finally {
       setSaving(false);
       setProgress("");
@@ -572,101 +764,101 @@ function UploadForm({ onClose, onSaved }: { onClose: () => void; onSaved: () => 
 
   return (
     <Modal onClose={saving ? () => {} : onClose}>
-      <form onSubmit={submit}>
-        <h2 className="mb-5 text-lg font-semibold text-neutral-900 dark:text-neutral-100">Upload Dokumen</h2>
-        <button
-          type="button"
-          onClick={() => inputRef.current?.click()}
-          className="flex w-full flex-col items-center gap-2 rounded-xl border-2 border-dashed border-neutral-300 px-4 py-8 text-sm text-neutral-500 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-neutral-700"
-        >
-          <FileIcon />
-          {files.length === 0 ? "Pilih file (foto, PDF, dll — maks. 10 MB)" : `${files.length} file dipilih`}
-        </button>
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
-        />
-        {files.length > 0 && (
-          <ul className="mt-3 space-y-1 text-xs">
-            {files.map((f) => (
-              <li
-                key={f.name + f.size}
-                className={`flex justify-between gap-2 ${f.size > MAX_FILE_BYTES ? "text-red-600" : "text-neutral-600 dark:text-neutral-400"}`}
+      <form onSubmit={submit} autoComplete="off">
+        <h2 className="mb-5 text-lg font-semibold text-neutral-900 dark:text-neutral-100">
+          {initial ? "Edit Dokumen" : "Tambah Dokumen"}
+        </h2>
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-neutral-600 dark:text-neutral-400">
+              Nama dokumen
+            </label>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="mis. KTP"
+              autoFocus={!initial}
+              required
+              className={INPUT}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-neutral-600 dark:text-neutral-400">
+              File ({total})
+            </label>
+            <div className="grid grid-cols-4 gap-2">
+              {kept.map((f) => (
+                <div key={f.id} className="relative">
+                  <Thumb file={f} className="aspect-square w-full" />
+                  <button
+                    type="button"
+                    onClick={() => setKept((prev) => prev.filter((x) => x.id !== f.id))}
+                    title="Hapus file"
+                    className="absolute -right-1.5 -top-1.5 rounded-full bg-red-600 p-1 text-white shadow"
+                  >
+                    <XIcon />
+                  </button>
+                </div>
+              ))}
+              {pending.map((p) => (
+                <div key={p.key} className="relative">
+                  <div
+                    title={p.file.name}
+                    className={`flex aspect-square w-full items-center justify-center overflow-hidden rounded-lg border bg-neutral-100 text-neutral-400 dark:bg-neutral-800 ${
+                      p.file.size > MAX_FILE_BYTES ? "border-red-500" : "border-indigo-300 dark:border-indigo-700"
+                    }`}
+                  >
+                    {p.preview ? (
+                      // eslint-disable-next-line @next/next/no-img-element -- local blob URL
+                      <img src={p.preview} alt={p.file.name} className="h-full w-full object-cover" />
+                    ) : (
+                      <span className="flex flex-col items-center gap-0.5 px-1">
+                        <FileIcon />
+                        <span className="max-w-full truncate text-[9px] uppercase">{p.file.name.split(".").pop()}</span>
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removePending(p.key)}
+                    title="Batalkan"
+                    className="absolute -right-1.5 -top-1.5 rounded-full bg-red-600 p-1 text-white shadow"
+                  >
+                    <XIcon />
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => inputRef.current?.click()}
+                className="flex aspect-square w-full flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-neutral-300 text-neutral-400 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-neutral-700"
               >
-                <span className="truncate">{f.name}</span>
-                <span className="shrink-0">{formatBytes(f.size)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-        {tooBig.length > 0 && <p className="mt-2 text-xs text-red-600">File melebihi batas 10 MB.</p>}
-        <div className="mt-4">
-          <label className="mb-1.5 block text-xs font-medium text-neutral-600 dark:text-neutral-400">
-            Catatan <span className="text-neutral-400">(opsional)</span>
-          </label>
-          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className={`${INPUT} resize-none`} />
+                <PlusIcon />
+                <span className="text-[10px]">Tambah</span>
+              </button>
+            </div>
+            <input ref={inputRef} type="file" multiple className="hidden" onChange={(e) => addFiles(e.target.files)} />
+            <p className="mt-1.5 text-xs text-neutral-400">
+              Bisa beberapa foto (mis. depan/belakang), PDF, dll. Maks. 10 MB per file.
+            </p>
+            {tooBig && <p className="mt-1 text-xs text-red-600">Ada file yang melebihi 10 MB.</p>}
+          </div>
+
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-neutral-600 dark:text-neutral-400">
+              Catatan <span className="text-neutral-400">(opsional)</span>
+            </label>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className={`${INPUT} resize-none`} />
+          </div>
         </div>
         <p className="mt-3 text-xs text-neutral-400">File dienkripsi di browser sebelum dikirim ke server.</p>
         <div className="mt-6 flex gap-2">
           <button type="button" onClick={onClose} disabled={saving} className={SECONDARY_BTN}>
             Batal
           </button>
-          <button
-            type="submit"
-            disabled={saving || files.length === 0 || tooBig.length > 0}
-            className={`${PRIMARY_BTN} flex-1`}
-          >
-            {saving ? `Mengupload ${progress}...` : "Upload"}
-          </button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-function FileEditForm({ item, onClose, onSaved }: { item: FileItem; onClose: () => void; onSaved: () => void }) {
-  const { key } = useVaultStore();
-  const [name, setName] = useState(item.payload.name);
-  const [notes, setNotes] = useState(item.payload.notes ?? "");
-  const [saving, setSaving] = useState(false);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!key || !name.trim()) return;
-    setSaving(true);
-    try {
-      await saveItem(key, { ...item.payload, name: name.trim(), notes: notes.trim() || undefined }, item.id);
-      onSaved();
-    } catch (err) {
-      window.alert((err as Error).message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Modal onClose={onClose}>
-      <form onSubmit={submit}>
-        <h2 className="mb-5 text-lg font-semibold text-neutral-900 dark:text-neutral-100">Edit Dokumen</h2>
-        <div className="space-y-3">
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-neutral-600 dark:text-neutral-400">Nama file</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} required className={INPUT} />
-          </div>
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-neutral-600 dark:text-neutral-400">Catatan</label>
-            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} className={`${INPUT} resize-none`} />
-          </div>
-        </div>
-        <div className="mt-6 flex gap-2">
-          <button type="button" onClick={onClose} className={SECONDARY_BTN}>
-            Batal
-          </button>
-          <button type="submit" disabled={saving} className={`${PRIMARY_BTN} flex-1`}>
-            {saving ? "Menyimpan..." : "Simpan"}
+          <button type="submit" disabled={saving || total === 0 || tooBig} className={`${PRIMARY_BTN} flex-1`}>
+            {saving ? (progress ? `Mengupload${progress}...` : "Menyimpan...") : "Simpan"}
           </button>
         </div>
       </form>

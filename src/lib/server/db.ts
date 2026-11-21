@@ -26,9 +26,10 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
 
-  -- Encrypted file contents (iv || AES-GCM ciphertext); id matches the item in credentials.
+  -- Encrypted file contents (iv || AES-GCM ciphertext); item_id is the document in credentials.
   CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
+    item_id TEXT,
     data BLOB NOT NULL,
     created_at INTEGER NOT NULL
   );
@@ -53,5 +54,11 @@ if (!vaultMetaColumns.includes("kdf_iterations")) {
 if (!vaultMetaColumns.includes("version")) {
   db.exec("ALTER TABLE vault_meta ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
 }
+
+const fileColumns = (db.prepare("PRAGMA table_info(files)").all() as { name: string }[]).map((c) => c.name);
+if (!fileColumns.includes("item_id")) {
+  db.exec("ALTER TABLE files ADD COLUMN item_id TEXT");
+}
+db.exec("CREATE INDEX IF NOT EXISTS files_item_id ON files(item_id)");
 
 export default db;

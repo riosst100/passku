@@ -15,7 +15,7 @@ export async function DELETE(
   const { id } = await params;
   db.transaction(() => {
     db.prepare("DELETE FROM credentials WHERE id = ?").run(id);
-    db.prepare("DELETE FROM files WHERE id = ?").run(id);
+    db.prepare("DELETE FROM files WHERE id = ? OR item_id = ?").run(id, id);
   })();
   return NextResponse.json({ ok: true });
 }
