@@ -2,15 +2,20 @@
 
 import { useEffect, useState } from "react";
 import { useVaultStore } from "@/store/useVaultStore";
-import { getLoadedAt, IDLE_TIMEOUT_MS } from "@/lib/sessionKey";
+import { getLoadedAt, IDLE_TIMEOUT_MS, isIdleLockEnabled } from "@/lib/sessionKey";
 
 export function IdleLockWatcher() {
   const status = useVaultStore((s) => s.status);
   const lock = useVaultStore((s) => s.lock);
   const [remainingMs, setRemainingMs] = useState(IDLE_TIMEOUT_MS);
+  const [enabled, setEnabled] = useState(true);
 
   useEffect(() => {
-    if (status !== "unlocked") return;
+    setEnabled(isIdleLockEnabled());
+  }, []);
+
+  useEffect(() => {
+    if (status !== "unlocked" || !enabled) return;
 
     const loadedAt = getLoadedAt() ?? Date.now();
     const deadline = loadedAt + IDLE_TIMEOUT_MS;
@@ -27,9 +32,9 @@ export function IdleLockWatcher() {
     tick();
     const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
-  }, [status, lock]);
+  }, [status, lock, enabled]);
 
-  if (status !== "unlocked") return null;
+  if (status !== "unlocked" || !enabled) return null;
 
   const totalSeconds = Math.ceil(remainingMs / 1000);
   const minutes = Math.floor(totalSeconds / 60);

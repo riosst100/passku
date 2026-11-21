@@ -10,6 +10,7 @@ import {
   getLastSyncedAt,
 } from "@/lib/credentials";
 import { DevicesPanel } from "@/components/DevicesPanel";
+import { DocumentsView, TextDocsView } from "@/components/DocumentViews";
 import { detectNewSessions } from "@/lib/knownSessions";
 import type { CredentialPayload } from "@/types";
 
@@ -156,10 +157,21 @@ function formatLastSync(ts: number | null): string {
   );
 }
 
+type Tab = "credentials" | "documents" | "text";
+
+const TABS: { id: Tab; label: string; unit: string }[] = [
+  { id: "credentials", label: "Credentials", unit: "credentials" },
+  { id: "documents", label: "Documents", unit: "dokumen" },
+  { id: "text", label: "Text Documents", unit: "dokumen teks" },
+];
+
 export function CredentialsView() {
   const { key, lock } = useVaultStore();
   const [entries, setEntries] = useState<Entry[]>([]);
   const [query, setQuery] = useState("");
+  const [tab, setTab] = useState<Tab>("credentials");
+  const [otherCount, setOtherCount] = useState(0);
+  const [syncTick, setSyncTick] = useState(0);
   const [showForm, setShowForm] = useState(false);
   const [showDevices, setShowDevices] = useState(false);
   const [editing, setEditing] = useState<Entry | null>(null);
@@ -211,6 +223,7 @@ export function CredentialsView() {
       setSyncing(true);
       void syncCredentials()
         .then(refresh)
+        .then(() => setSyncTick((t) => t + 1))
         .finally(() => setSyncing(false));
     };
     const onOffline = () => setOnline(false);
@@ -345,7 +358,9 @@ export function CredentialsView() {
               </span>
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-neutral-500 dark:text-neutral-400">
-              <span>{entries.length} credentials</span>
+              <span>
+                {tab === "credentials" ? entries.length : otherCount} {TABS.find((t) => t.id === tab)!.unit}
+              </span>
               <span className="text-neutral-300 dark:text-neutral-700">·</span>
               <span>sync terakhir {formatLastSync(lastSyncedAt)}</span>
             </div>
@@ -373,6 +388,31 @@ export function CredentialsView() {
           </div>
         </div>
 
+        {/* Menu */}
+        <nav className="mb-5 flex gap-1 overflow-x-auto rounded-xl border border-neutral-200 bg-white p-1 dark:border-neutral-800 dark:bg-neutral-900">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => {
+                setTab(t.id);
+                setOtherCount(0);
+              }}
+              className={`flex-1 whitespace-nowrap rounded-lg px-3 py-2 text-xs font-medium transition sm:text-sm ${
+                tab === t.id
+                  ? "bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-sm"
+                  : "text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+
+        {tab === "documents" && <DocumentsView refreshToken={syncTick} onCount={setOtherCount} />}
+        {tab === "text" && <TextDocsView refreshToken={syncTick} onCount={setOtherCount} />}
+
+        {tab === "credentials" && (
+        <>
         {/* Search + add */}
         <div className="mb-5 flex gap-2">
           <div className="relative flex-1">
@@ -500,6 +540,8 @@ export function CredentialsView() {
             </div>
           )}
         </ul>
+        </>
+        )}
       </div>
 
       {showForm && (

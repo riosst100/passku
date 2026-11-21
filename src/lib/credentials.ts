@@ -1,5 +1,5 @@
 import { decryptString, encryptString } from "@/lib/crypto";
-import type { Credential, CredentialPayload } from "@/types";
+import { isCredentialPayload, type Credential, type CredentialPayload, type VaultPayload } from "@/types";
 
 /**
  * Online-only: the credential ciphertext is kept in memory while the vault is unlocked and is gone
@@ -28,7 +28,7 @@ export class OfflineError extends Error {
 
 class StaleVaultError extends Error {}
 
-function notifyStale(): void {
+export function notifyStale(): void {
   window.dispatchEvent(new Event(VAULT_STALE_EVENT));
 }
 
@@ -54,8 +54,8 @@ export function clearCredentialCache(): void {
   credentials.clear();
 }
 
-function writeHeaders(): Record<string, string> {
-  return { "Content-Type": "application/json", [VAULT_VERSION_HEADER]: String(vaultVersion) };
+export function writeHeaders(contentType = "application/json"): Record<string, string> {
+  return { "Content-Type": contentType, [VAULT_VERSION_HEADER]: String(vaultVersion) };
 }
 
 const LAST_SYNCED_KEY = "passku_last_synced_at";
@@ -87,20 +87,39 @@ export async function syncCredentials(): Promise<"ok" | "stale" | "offline"> {
   }
 }
 
+export interface VaultItem<P extends VaultPayload = VaultPayload> {
+  id: string;
+  payload: P;
+  updatedAt: number;
+}
+
+/** Every item in the vault (credentials, text documents, files), decrypted. */
+export async function listItems(key: CryptoKey): Promise<Array<VaultItem & { legacySite: string }>> {
+  return Promise.all(
+    cachedCredentials().map(async (row) => ({
+      id: row.id,
+      legacySite: row.site,
+      updatedAt: row.updatedAt,
+      payload: JSON.parse(await decryptString(key, row.data)) as VaultPayload,
+    }))
+  );
+}
+
 export async function listCredentials(
   key: CryptoKey
 ): Promise<Array<{ id: string; site: string; payload: CredentialPayload; updatedAt: number }>> {
-  const entries = await Promise.all(
-    cachedCredentials().map(async (row) => {
-      const payload = JSON.parse(await decryptString(key, row.data)) as CredentialPayload;
-      return {
-        id: row.id,
-        // Entries encrypted before the site name moved into the payload still have it in plaintext.
-        site: payload.site ?? row.site,
-        updatedAt: row.updatedAt,
-        payload,
-      };
-    })
+  const entries = (await listItems(key)).flatMap((item) =>
+    isCredentialPayload(item.payload)
+      ? [
+          {
+            id: item.id,
+            // Entries encrypted before the site name moved into the payload still have it in plaintext.
+            site: item.payload.site ?? item.legacySite,
+            updatedAt: item.updatedAt,
+            payload: item.payload,
+          },
+        ]
+      : []
   );
   return entries.sort((a, b) => a.site.localeCompare(b.site, undefined, { sensitivity: "base" }));
 }
@@ -112,11 +131,16 @@ export async function saveCredential(
   payload: CredentialPayload,
   id?: string
 ): Promise<void> {
+  await saveItem(key, { ...payload, site }, id);
+}
+
+/** Encrypts and saves any vault item; throws OfflineError when the server can't be reached. */
+export async function saveItem(key: CryptoKey, payload: VaultPayload, id?: string): Promise<void> {
   const now = Date.now();
   const record: Credential = {
     id: id ?? crypto.randomUUID(),
     site: "",
-    data: await encryptString(key, JSON.stringify({ ...payload, site })),
+    data: await encryptString(key, JSON.stringify(payload)),
     createdAt: id ? credentials.get(id)?.createdAt ?? now : now,
     updatedAt: now,
   };
@@ -134,7 +158,7 @@ export async function saveCredential(
   credentials.set(record.id, record);
 }
 
-/** Deletes on the server; throws OfflineError when it can't be reached. */
+/** Deletes on the server (an uploaded file goes with it); throws OfflineError when it can't be reached. */
 export async function deleteCredential(id: string): Promise<void> {
   const res = await fetch(`/api/credentials/${id}`, {
     method: "DELETE",

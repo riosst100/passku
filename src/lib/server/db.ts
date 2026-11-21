@@ -26,6 +26,13 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
 
+  -- Encrypted file contents (iv || AES-GCM ciphertext); id matches the item in credentials.
+  CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY,
+    data BLOB NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     ip TEXT,

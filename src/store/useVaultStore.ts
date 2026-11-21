@@ -107,7 +107,7 @@ async function upgradeVaultIfNeeded(password: string, key: CryptoKey, meta: Full
       decrypted.map(async ({ row, payload }) => ({
         id: row.id,
         previousUpdatedAt: row.updatedAt,
-        data: await encryptString(newKey, JSON.stringify({ ...payload, site: payload.site ?? row.site })),
+        data: await encryptString(newKey, JSON.stringify(row.site ? { ...payload, site: payload.site ?? row.site } : payload)),
       }))
     );
 

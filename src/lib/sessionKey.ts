@@ -3,6 +3,13 @@ import { exportKeyToJwk, importKeyFromJwk } from "@/lib/crypto";
 const STORAGE_KEY = "passku_session_key";
 export const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
+/** Auto-lock is skipped when the app is opened on this machine (local development). */
+export function isIdleLockEnabled(): boolean {
+  if (typeof window === "undefined") return true;
+  const host = window.location.hostname;
+  return !(host === "localhost" || host === "127.0.0.1" || host === "[::1]");
+}
+
 interface StoredSession {
   jwk: JsonWebKey;
   loadedAt: number;
@@ -23,7 +30,7 @@ export async function restoreSessionKey(): Promise<{ key: CryptoKey; version: nu
 
   try {
     const payload = JSON.parse(raw) as StoredSession;
-    if (Date.now() - payload.loadedAt > IDLE_TIMEOUT_MS) {
+    if (isIdleLockEnabled() && Date.now() - payload.loadedAt > IDLE_TIMEOUT_MS) {
       sessionStorage.removeItem(STORAGE_KEY);
       return null;
     }

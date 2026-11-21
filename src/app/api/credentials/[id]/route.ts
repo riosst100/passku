@@ -13,6 +13,9 @@ export async function DELETE(
   if (stale) return stale;
 
   const { id } = await params;
-  db.prepare("DELETE FROM credentials WHERE id = ?").run(id);
+  db.transaction(() => {
+    db.prepare("DELETE FROM credentials WHERE id = ?").run(id);
+    db.prepare("DELETE FROM files WHERE id = ?").run(id);
+  })();
   return NextResponse.json({ ok: true });
 }
